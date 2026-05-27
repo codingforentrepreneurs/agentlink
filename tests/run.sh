@@ -61,8 +61,18 @@ assert_file "$tmp_repo/.gitignore"
 assert_file "$tmp_repo/distribution.yaml"
 assert_file "$tmp_repo/profile.md"
 assert_link "$tmp_hermes/profiles/demo/config.yaml"
+grep -q '\${HERMES_ROOT}/profiles/demo' "$tmp_repo/README.md"
+! grep -q "$tmp_hermes" "$tmp_repo/README.md" || fail "README used absolute HERMES_ROOT path"
 tail -1 /tmp/agentlink-sync.out | grep -q "Synced Hermes profile demo to $tmp_repo"
 pass "sync explicit destination"
+
+tmp_default_repo=$(mktemp -d /private/tmp/agentlink-default-readme.XXXXXX)
+tmp_default_home=$(mktemp -d /private/tmp/agentlink-default-home.XXXXXX)
+mkdir -p "$tmp_default_home/.hermes/profiles/default-readme"
+HOME="$tmp_default_home" "$agentlink" sync default-readme "$tmp_default_repo" >/tmp/agentlink-default-readme.out
+grep -q '~/.hermes/profiles/default-readme' "$tmp_default_repo/README.md"
+! grep -q "$tmp_default_home" "$tmp_default_repo/README.md" || fail "README used absolute HOME path"
+pass "readme uses portable Hermes path"
 
 HERMES_ROOT="$tmp_hermes" "$agentlink" check demo "$tmp_repo" >/tmp/agentlink-check.out
 grep -q "Check OK" /tmp/agentlink-check.out

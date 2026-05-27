@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 dry_run=0
 verbose=0
@@ -298,8 +298,17 @@ is_correct_symlink() {
   [[ "$(readlink "$live_path")" == "$repo_path" ]]
 }
 
+display_live_profile_dir() {
+  if [[ "$hermes_root_from_env" -eq 1 ]]; then
+    printf '${HERMES_ROOT}/profiles/%s\n' "$profile_name"
+  else
+    printf '~/.hermes/profiles/%s\n' "$profile_name"
+  fi
+}
+
 write_readme() {
   local readme_path="${repo_profile_dir}/README.md"
+  local live_profile_display
 
   path_exists "$readme_path" && return
 
@@ -307,6 +316,8 @@ write_readme() {
     log_detail "DRY-RUN create $readme_path"
     return
   fi
+
+  live_profile_display=$(display_live_profile_dir)
 
   cat >"$readme_path" <<EOF
 # ${profile_name}
@@ -316,7 +327,7 @@ This directory is the git-tracked source of truth for portable Hermes profile fi
 Corresponding live Hermes profile:
 
 \`\`\`
-${live_profile_dir}
+${live_profile_display}
 \`\`\`
 
 Hermes reads the portable profile files through symlinks from the live profile directory back to this directory.
@@ -864,6 +875,12 @@ if [[ "$command" == "upgrade" ]]; then
   [[ ${#args[@]} -eq 0 ]] || fail "upgrade does not accept profile arguments"
   upgrade_agentlink
   exit 0
+fi
+
+if [[ -n "${HERMES_ROOT+x}" ]]; then
+  hermes_root_from_env=1
+else
+  hermes_root_from_env=0
 fi
 
 hermes_root="${HERMES_ROOT:-$HOME/.hermes}"
