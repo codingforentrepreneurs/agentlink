@@ -4,7 +4,69 @@ A tool for linking Hermes Agent profiles to git-managed folders outside `~/.herm
 
 `agentlink` lets you keep the portable parts of a Hermes profile in a normal git repo while Hermes continues reading them from the live profile directory through symlinks.
 
-## Install
+## Quick Start: Use a Profile Repo
+
+Clone the profile repo where you want to manage it:
+
+```bash
+mkdir -p ~/dev/agents
+cd ~/dev/agents
+git clone git@github.com:YOUR_ORG/agent-profiles.git
+cd agent-profiles
+```
+
+Install a profile into Hermes with an alias:
+
+```bash
+hermes profile install profiles/agent-1 --alias
+```
+
+To use a different command/profile name:
+
+```bash
+hermes profile install profiles/agent-1 --alias --name <name-arg>
+```
+
+Configure the model and start a chat through the alias:
+
+```bash
+agent-1 model
+agent-1 chat
+```
+
+If you install without `--alias`, use Hermes' profile flag:
+
+```bash
+hermes profile install profiles/agent-1
+hermes -p agent-1 model
+hermes -p agent-1 chat
+```
+
+If you already have the profile installed locally, connect the live Hermes profile to the cloned repo:
+
+```bash
+agentlink sync agent-1 profiles/agent-1
+```
+
+After that, normal git updates change what Hermes reads:
+
+```bash
+git pull
+agentlink check agent-1 profiles/agent-1
+```
+
+For a repo that contains multiple agent profiles:
+
+```bash
+git clone git@github.com:YOUR_ORG/my-agents.git
+cd my-agents
+hermes profile install ./profiles/agent-1 --alias
+agentlink sync agent-1 profiles/agent-1
+agent-1 model
+agent-1 chat
+```
+
+## Install agentlink
 
 Install from GitHub:
 
@@ -69,47 +131,6 @@ Git folder for profile files:
 ```
 
 If the profile name does not exist in `${HERMES_ROOT:-$HOME/.hermes}/profiles`, `agentlink` shows the available profiles instead of creating a new live profile.
-
-## Use a Profile Repo from GitHub
-
-Install the profile into Hermes first:
-
-```bash
-hermes profile install github.com/YOUR_ORG/my-profile --alias my-profile
-```
-
-Clone the same profile repo where you want to manage it:
-
-```bash
-mkdir -p ~/dev/agents
-cd ~/dev/agents
-git clone git@github.com:YOUR_ORG/my-profile.git
-cd my-profile
-```
-
-Connect the live Hermes profile to the cloned repo:
-
-```bash
-agentlink sync my-profile .
-```
-
-After that, normal git updates change what Hermes reads:
-
-```bash
-git pull
-agentlink check my-profile .
-```
-
-If you already have the profile installed locally, you can skip `hermes profile install` and just run `agentlink sync <profile> .` inside the cloned repo.
-
-For a repo that contains multiple agent profiles:
-
-```bash
-git clone git@github.com:YOUR_ORG/my-agents.git
-cd my-agents
-hermes profile install ./profiles/agent-1 --alias agent-1
-agentlink sync agent-1 profiles/agent-1
-```
 
 Useful options:
 
