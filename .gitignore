@@ -1,0 +1,34 @@
+.DS_Store
+
+# Editor and IDE state
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Shell/local test output
+*.log
+tmp/
+temp/
+
+# Python/tooling clutter
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local env and secrets
+.env
+.env.*
+auth.json
+credentials.json
+token*.json
+*.pem
+*.key
+
+# Runtime databases if tests create them
+*.sqlite
+*.sqlite3
+state.db
+state.db-*
+state.db-shm
+state.db-wal

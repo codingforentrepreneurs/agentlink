@@ -1,0 +1,905 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+
+dry_run=0
+verbose=0
+assume_yes=0
+command="sync"
+from_profile=""
+profiles=()
+
+portable_items=(
+  distribution.yaml
+  SOUL.md
+  config.yaml
+  mcp.json
+  skills
+  plugins
+  cron
+  AGENTS.md
+  CLAUDE.md
+  profile.md
+)
+
+runtime_only_items=(
+  .env
+  auth.json
+  state.db
+  state.db-shm
+  state.db-wal
+  memories
+  sessions
+  logs
+  workspace
+  plans
+  home
+  local
+  audio_cache
+  image_cache
+  document_cache
+  cache
+  tmp
+)
+
+usage() {
+  local command_name
+
+  command_name=$(basename "$0")
+  cat >&2 <<EOF
+Usage:
+  ${command_name} [options] [profile-name] [path/to/git-folder]
+  ${command_name} sync [options] [profile-name] [path/to/git-folder]
+  ${command_name} check [options] [profile-name] [path/to/git-folder]
+  ${command_name} status [options] [profile-name] [path/to/git-folder]
+  ${command_name} list
+  ${command_name} version
+  ${command_name} upgrade
+  ${command_name} uninstall
+
+Options:
+  -n, --dry-run    Show what would change without writing files
+  -v, --verbose    Print create/move/link details
+  -y, --yes        Non-interactive mode; fail instead of prompting
+      --from-profile <profile>
+                   Seed missing files from another Hermes profile
+  -h, --help       Show help
+      --version    Show version
+EOF
+}
+
+script_dir() {
+  local source_path=$0
+  local dir
+
+  while [[ -L "$source_path" ]]; do
+    dir=$(cd -P "$(dirname "$source_path")" >/dev/null 2>&1 && pwd)
+    source_path=$(readlink "$source_path")
+    [[ "$source_path" == /* ]] || source_path="${dir}/${source_path}"
+  done
+
+  cd -P "$(dirname "$source_path")" >/dev/null 2>&1 && pwd
+}
+
+path_exists() {
+  local path=$1
+
+  [[ -e "$path" || -L "$path" ]]
+}
+
+log_detail() {
+  if [[ "$verbose" -eq 1 || "$dry_run" -eq 1 ]]; then
+    printf '%s\n' "$*" >&2
+  fi
+}
+
+warn() {
+  printf 'WARNING %s\n' "$*" >&2
+}
+
+fail() {
+  printf 'ERROR %s\n' "$*" >&2
+  exit 1
+}
+
+copy_from_profile_item() {
+  local item=$1
+  local source_path
+  local destination_path
+
+  [[ -n "$from_profile" ]] || return 1
+
+  source_path="${profiles_dir}/${from_profile}/${item}"
+  destination_path="${repo_profile_dir}/${item}"
+
+  if ! path_exists "$source_path" || path_exists "$destination_path"; then
+    return 1
+  fi
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    log_detail "DRY-RUN seed $destination_path from $source_path"
+    return 0
+  fi
+
+  if [[ -d "$source_path" && ! -L "$source_path" ]]; then
+    cp -R "$source_path" "$destination_path"
+  else
+    cp "$source_path" "$destination_path"
+  fi
+
+  log_detail "SEED $destination_path from $source_path"
+  return 0
+}
+
+timestamp() {
+  date '+%Y%m%d%H%M%S'
+}
+
+absolute_path() {
+  local input=$1
+  local parent
+  local name
+
+  if [[ -d "$input" ]]; then
+    cd -P "$input" >/dev/null 2>&1 && pwd
+    return
+  fi
+
+  parent=$(dirname "$input")
+  name=$(basename "$input")
+
+  if [[ -d "$parent" ]]; then
+    printf '%s/%s\n' "$(cd -P "$parent" >/dev/null 2>&1 && pwd)" "$name"
+  else
+    fail "parent folder does not exist: $parent"
+  fi
+}
+
+is_interactive() {
+  [[ "$assume_yes" -eq 0 ]]
+}
+
+load_profiles() {
+  local path
+
+  profiles=()
+
+  if [[ ! -d "$profiles_dir" ]]; then
+    return
+  fi
+
+  for path in "$profiles_dir"/*; do
+    [[ -d "$path" || -L "$path" ]] || continue
+    profiles+=("$(basename "$path")")
+  done
+}
+
+print_profiles() {
+  local index
+
+  load_profiles
+
+  if [[ ${#profiles[@]} -eq 0 ]]; then
+    printf 'No Hermes profiles found in %s\n' "$profiles_dir" >&2
+    return 1
+  fi
+
+  printf 'Hermes profiles:\n' >&2
+  for index in "${!profiles[@]}"; do
+    printf '  %s) %s\n' "$((index + 1))" "${profiles[$index]}" >&2
+  done
+}
+
+list_profiles() {
+  load_profiles
+
+  if [[ ${#profiles[@]} -eq 0 ]]; then
+    printf 'No Hermes profiles found in %s\n' "$profiles_dir" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "${profiles[@]}"
+}
+
+select_profile() {
+  local choice
+
+  print_profiles || exit 1
+
+  printf 'Select profile: ' >&2
+  IFS= read -r choice
+
+  if [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 1 && "$choice" -le "${#profiles[@]}" ]]; then
+    printf '%s\n' "${profiles[$((choice - 1))]}"
+    return
+  fi
+
+  if [[ -n "$choice" && "$choice" != */* && -d "${profiles_dir}/${choice}" ]]; then
+    printf '%s\n' "$choice"
+    return
+  fi
+
+  fail "invalid profile selection"
+}
+
+resolve_profile() {
+  if [[ -z "$profile_name" ]]; then
+    is_interactive || fail "profile name required"
+    profile_name=$(select_profile)
+  fi
+
+  if [[ -z "$profile_name" || "$profile_name" == */* ]]; then
+    usage
+    fail "profile name must be non-empty and must not contain /"
+  fi
+
+  live_profile_dir="${profiles_dir}/${profile_name}"
+
+  if path_exists "$live_profile_dir"; then
+    return
+  fi
+
+  printf 'ERROR Hermes profile not found: %s\n' "$live_profile_dir" >&2
+  print_profiles || true
+
+  if is_interactive; then
+    profile_name=$(select_profile)
+    live_profile_dir="${profiles_dir}/${profile_name}"
+  else
+    exit 1
+  fi
+}
+
+resolve_source_profile() {
+  if [[ -z "$from_profile" ]]; then
+    return
+  fi
+
+  if [[ "$from_profile" == */* ]]; then
+    fail "--from-profile must be a profile name, not a path"
+  fi
+
+  if ! path_exists "${profiles_dir}/${from_profile}"; then
+    fail "--from-profile profile not found: ${profiles_dir}/${from_profile}"
+  fi
+}
+
+resolve_repo_dir() {
+  if [[ -z "$repo_dir_input" ]]; then
+    if is_interactive; then
+      printf 'Git folder for profile files: ' >&2
+      IFS= read -r repo_dir_input
+    else
+      fail "git folder required"
+    fi
+  fi
+
+  [[ -n "$repo_dir_input" ]] || fail "git folder must be provided"
+
+  if [[ "$dry_run" -eq 0 ]]; then
+    mkdir -p "$repo_dir_input"
+  else
+    log_detail "DRY-RUN mkdir -p $repo_dir_input"
+  fi
+
+  repo_profile_dir=$(absolute_path "$repo_dir_input")
+
+  if [[ "$dry_run" -eq 0 ]]; then
+    mkdir -p "$repo_profile_dir"
+  fi
+}
+
+is_correct_symlink() {
+  local live_path=$1
+  local repo_path=$2
+
+  [[ -L "$live_path" ]] || return 1
+  [[ "$(readlink "$live_path")" == "$repo_path" ]]
+}
+
+write_readme() {
+  local readme_path="${repo_profile_dir}/README.md"
+
+  path_exists "$readme_path" && return
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    log_detail "DRY-RUN create $readme_path"
+    return
+  fi
+
+  cat >"$readme_path" <<EOF
+# ${profile_name}
+
+This directory is the git-tracked source of truth for portable Hermes profile files.
+
+Corresponding live Hermes profile:
+
+\`\`\`
+${live_profile_dir}
+\`\`\`
+
+Hermes reads the portable profile files through symlinks from the live profile directory back to this directory.
+
+## Tracked and symlinked
+
+- distribution.yaml
+- SOUL.md
+- config.yaml
+- mcp.json
+- skills/
+- plugins/
+- cron/
+- AGENTS.md
+- CLAUDE.md
+- profile.md
+
+## Runtime files
+
+Do not commit runtime-only files such as .env, auth.json, memories/, sessions/, state.db*, logs/, workspace/, plans/, home/, local/, *_cache/, or tmp/.
+EOF
+
+  log_detail "CREATE $readme_path"
+}
+
+write_gitignore() {
+  local gitignore_path="${repo_profile_dir}/.gitignore"
+
+  path_exists "$gitignore_path" && return
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    log_detail "DRY-RUN create $gitignore_path"
+    return
+  fi
+
+  cat >"$gitignore_path" <<'EOF'
+.env
+.env.*
+auth.json
+credentials.json
+token*.json
+*.pem
+*.key
+state.db
+state.db-
+state.db-*
+state.db-shm
+state.db-wal
+memories/
+sessions/
+logs/
+workspace/
+plans/
+home/
+local/
+*_cache/
+audio_cache/
+image_cache/
+document_cache/
+cache/
+tmp/
+*.sqlite
+*.sqlite3
+.DS_Store
+__pycache__/
+pycache/
+*.pyc
+.vscode/
+.idea/
+EOF
+
+  log_detail "CREATE $gitignore_path"
+}
+
+write_profile() {
+  local profile_path="${repo_profile_dir}/profile.md"
+
+  path_exists "$profile_path" && return
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    log_detail "DRY-RUN create $profile_path"
+    return
+  fi
+
+  cat >"$profile_path" <<'EOF'
+# Profile
+
+## Purpose
+
+TODO
+
+## Owns
+
+TODO
+
+## Should not own
+
+TODO
+
+## Notes
+
+TODO
+EOF
+
+  log_detail "CREATE $profile_path"
+}
+
+write_distribution() {
+  local distribution_path="${repo_profile_dir}/distribution.yaml"
+
+  path_exists "$distribution_path" && return
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    log_detail "DRY-RUN create $distribution_path"
+    return
+  fi
+
+  cat >"$distribution_path" <<EOF
+name: ${profile_name}
+version: 0.1.0
+description: ""
+hermes_requires: ""
+author: ""
+license: ""
+env_requires: []
+EOF
+
+  log_detail "CREATE $distribution_path"
+}
+
+write_soul() {
+  local soul_path="${repo_profile_dir}/SOUL.md"
+
+  path_exists "$soul_path" && return
+  copy_from_profile_item "SOUL.md" && return
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    log_detail "DRY-RUN create $soul_path"
+    return
+  fi
+
+  cat >"$soul_path" <<'EOF'
+# SOUL
+
+Describe this agent's personality, operating principles, and system-level behavior.
+EOF
+
+  log_detail "CREATE $soul_path"
+}
+
+write_config() {
+  local config_path="${repo_profile_dir}/config.yaml"
+
+  path_exists "$config_path" && return
+  copy_from_profile_item "config.yaml" && return
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    log_detail "DRY-RUN create $config_path"
+    return
+  fi
+
+  cat >"$config_path" <<'EOF'
+# Hermes profile config.
+# Add model, temperature, reasoning, and tool defaults here.
+{}
+EOF
+
+  log_detail "CREATE $config_path"
+}
+
+write_mcp() {
+  local mcp_path="${repo_profile_dir}/mcp.json"
+
+  path_exists "$mcp_path" && return
+  copy_from_profile_item "mcp.json" && return
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    log_detail "DRY-RUN create $mcp_path"
+    return
+  fi
+
+  cat >"$mcp_path" <<'EOF'
+{
+  "mcpServers": {}
+}
+EOF
+
+  log_detail "CREATE $mcp_path"
+}
+
+ensure_distribution_dir() {
+  local dir_path="${repo_profile_dir}/${1}"
+
+  path_exists "$dir_path" && return
+  copy_from_profile_item "$1" && return
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    log_detail "DRY-RUN mkdir -p $dir_path"
+    return
+  fi
+
+  mkdir -p "$dir_path"
+  log_detail "CREATE $dir_path"
+}
+
+link_to_repo() {
+  local live_path=$1
+  local repo_path=$2
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    log_detail "DRY-RUN ln -s $repo_path $live_path"
+    return
+  fi
+
+  ln -s "$repo_path" "$live_path"
+  log_detail "LINK $live_path -> $repo_path"
+}
+
+process_portable_item() {
+  local item=$1
+  local live_path="${live_profile_dir}/${item}"
+  local repo_path="${repo_profile_dir}/${item}"
+  local backup_path
+
+  if is_correct_symlink "$live_path" "$repo_path"; then
+    log_detail "OK $live_path -> $repo_path"
+    return
+  fi
+
+  if [[ -L "$live_path" ]]; then
+    log_detail "REPLACE $live_path symlink target $(readlink "$live_path") with $repo_path"
+    if [[ "$dry_run" -eq 0 ]]; then
+      rm "$live_path"
+    fi
+    link_to_repo "$live_path" "$repo_path"
+    return
+  fi
+
+  if path_exists "$live_path" && ! path_exists "$repo_path"; then
+    log_detail "MOVE $live_path -> $repo_path"
+    if [[ "$dry_run" -eq 0 ]]; then
+      mv "$live_path" "$repo_path"
+    fi
+    link_to_repo "$live_path" "$repo_path"
+    return
+  fi
+
+  if path_exists "$repo_path" && ! path_exists "$live_path"; then
+    link_to_repo "$live_path" "$repo_path"
+    return
+  fi
+
+  if path_exists "$live_path" && path_exists "$repo_path"; then
+    backup_path="${live_path}.backup.$(timestamp)"
+
+    while path_exists "$backup_path"; do
+      backup_path="${live_path}.backup.$(timestamp).${RANDOM}"
+    done
+
+    log_detail "BACKUP $live_path -> $backup_path"
+    if [[ "$dry_run" -eq 0 ]]; then
+      mv "$live_path" "$backup_path"
+    fi
+    link_to_repo "$live_path" "$repo_path"
+    return
+  fi
+
+  log_detail "SKIP $item"
+}
+
+warn_runtime_items() {
+  local item repo_path live_path
+
+  for item in "${runtime_only_items[@]}"; do
+    repo_path="${repo_profile_dir}/${item}"
+    live_path="${live_profile_dir}/${item}"
+
+    if path_exists "$repo_path"; then
+      warn "runtime-only item exists in git folder: $repo_path"
+    fi
+
+    if [[ -L "$live_path" ]]; then
+      warn "runtime-only item in live profile is a symlink: $live_path -> $(readlink "$live_path")"
+    fi
+  done
+}
+
+sync_profile() {
+  local item
+
+  write_readme
+  write_gitignore
+  write_soul
+  write_config
+  write_mcp
+  ensure_distribution_dir "skills"
+  ensure_distribution_dir "cron"
+
+  for item in "${portable_items[@]}"; do
+    if [[ "$item" == "profile.md" || "$item" == "distribution.yaml" ]]; then
+      continue
+    fi
+    process_portable_item "$item"
+  done
+
+  if ! path_exists "${repo_profile_dir}/distribution.yaml" && ! path_exists "${live_profile_dir}/distribution.yaml"; then
+    write_distribution
+  fi
+  process_portable_item "distribution.yaml"
+
+  if ! path_exists "${repo_profile_dir}/profile.md" && ! path_exists "${live_profile_dir}/profile.md"; then
+    write_profile
+  fi
+  process_portable_item "profile.md"
+
+  warn_runtime_items
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    printf 'Dry run complete for Hermes profile %s to %s\n' "$profile_name" "$repo_profile_dir"
+  else
+    printf 'Synced Hermes profile %s to %s\n' "$profile_name" "$repo_profile_dir"
+  fi
+}
+
+doctor_profile() {
+  local item live_path repo_path issues=0
+
+  if ! path_exists "$repo_profile_dir"; then
+    printf 'ISSUE git folder missing: %s\n' "$repo_profile_dir" >&2
+    issues=$((issues + 1))
+  fi
+
+  for item in README.md .gitignore; do
+    if ! path_exists "${repo_profile_dir}/${item}"; then
+      printf 'ISSUE missing %s\n' "${repo_profile_dir}/${item}" >&2
+      issues=$((issues + 1))
+    fi
+  done
+
+  for item in "${portable_items[@]}"; do
+    live_path="${live_profile_dir}/${item}"
+    repo_path="${repo_profile_dir}/${item}"
+
+    if path_exists "$repo_path"; then
+      if ! is_correct_symlink "$live_path" "$repo_path"; then
+        printf 'ISSUE %s is not linked to %s\n' "$live_path" "$repo_path" >&2
+        issues=$((issues + 1))
+      fi
+    elif path_exists "$live_path"; then
+      printf 'ISSUE portable item still only exists live: %s\n' "$live_path" >&2
+      issues=$((issues + 1))
+    fi
+  done
+
+  for item in "${runtime_only_items[@]}"; do
+    repo_path="${repo_profile_dir}/${item}"
+    live_path="${live_profile_dir}/${item}"
+
+    if path_exists "$repo_path"; then
+      printf 'ISSUE runtime-only item exists in git folder: %s\n' "$repo_path" >&2
+      issues=$((issues + 1))
+    fi
+
+    if [[ -L "$live_path" ]]; then
+      printf 'ISSUE runtime-only item is symlinked live: %s -> %s\n' "$live_path" "$(readlink "$live_path")" >&2
+      issues=$((issues + 1))
+    fi
+  done
+
+  if [[ "$issues" -eq 0 ]]; then
+    printf 'Check OK for Hermes profile %s at %s\n' "$profile_name" "$repo_profile_dir"
+  else
+    printf 'Check found %s issue(s) for Hermes profile %s at %s\n' "$issues" "$profile_name" "$repo_profile_dir"
+    exit 1
+  fi
+}
+
+status_profile() {
+  local item live_path repo_path linked=0 repo_only=0 live_only=0 conflict=0 missing=0 runtime=0
+
+  for item in "${portable_items[@]}"; do
+    live_path="${live_profile_dir}/${item}"
+    repo_path="${repo_profile_dir}/${item}"
+
+    if is_correct_symlink "$live_path" "$repo_path"; then
+      linked=$((linked + 1))
+    elif path_exists "$repo_path" && ! path_exists "$live_path"; then
+      repo_only=$((repo_only + 1))
+    elif path_exists "$live_path" && ! path_exists "$repo_path"; then
+      live_only=$((live_only + 1))
+    elif path_exists "$live_path" && path_exists "$repo_path"; then
+      conflict=$((conflict + 1))
+    else
+      missing=$((missing + 1))
+    fi
+  done
+
+  for item in "${runtime_only_items[@]}"; do
+    repo_path="${repo_profile_dir}/${item}"
+    live_path="${live_profile_dir}/${item}"
+
+    if path_exists "$repo_path" || [[ -L "$live_path" ]]; then
+      runtime=$((runtime + 1))
+    fi
+  done
+
+  printf 'Status Hermes profile %s at %s\n' "$profile_name" "$repo_profile_dir"
+  printf 'linked=%s repo-only=%s live-only=%s conflicts=%s missing=%s runtime-warnings=%s\n' \
+    "$linked" "$repo_only" "$live_only" "$conflict" "$missing" "$runtime"
+}
+
+uninstall_agentlink() {
+  local bin_dir
+  local target
+  local installed_script
+  local installed_home
+
+  bin_dir="${AGENT_LINK_BIN_DIR:-$HOME/.local/bin}"
+  target="${bin_dir}/agentlink"
+  installed_script="$(script_dir)/agentlink"
+  installed_home=$(cd -P "$(script_dir)/.." >/dev/null 2>&1 && pwd)
+
+  if [[ ! -e "$target" && ! -L "$target" ]]; then
+    printf 'agentlink is not installed\n'
+    return
+  fi
+
+  if [[ ! -L "$target" ]]; then
+    fail "refusing to remove non-symlink: $target"
+  fi
+
+  if [[ "$(readlink "$target")" != "$installed_script" ]]; then
+    fail "refusing to remove $target; it points to $(readlink "$target"), not $installed_script"
+  fi
+
+  rm "$target"
+
+  if [[ "$installed_home" == "${AGENTLINK_HOME:-$HOME/.local/share/agentlink}" ]]; then
+    rm -rf "$installed_home"
+  fi
+
+  printf 'Uninstalled agentlink\n'
+}
+
+upgrade_agentlink() {
+  local local_installer
+  local repo_raw_url
+
+  local_installer="$(script_dir)/../install.sh"
+
+  if [[ -f "$local_installer" ]]; then
+    exec bash "$local_installer"
+  fi
+
+  repo_raw_url="${AGENTLINK_RAW_URL:-https://raw.githubusercontent.com/codingforentrepreneurs/agentlink/main}"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "${repo_raw_url}/install.sh" | bash
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO - "${repo_raw_url}/install.sh" | bash
+  else
+    fail "upgrade requires curl or wget"
+  fi
+}
+
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --version)
+      printf 'agentlink %s\n' "$VERSION"
+      exit 0
+      ;;
+    -n|--dry-run)
+      dry_run=1
+      ;;
+    -v|--verbose)
+      verbose=1
+      ;;
+    -y|--yes)
+      assume_yes=1
+      ;;
+    --from-profile)
+      shift
+      [[ $# -gt 0 ]] || fail "--from-profile requires a profile name"
+      from_profile=$1
+      ;;
+    --from-profile=*)
+      from_profile=${1#*=}
+      ;;
+    sync)
+      command="sync"
+      ;;
+    check)
+      command="check"
+      ;;
+    status)
+      command="status"
+      ;;
+    list)
+      command="list"
+      ;;
+    uninstall)
+      command="uninstall"
+      ;;
+    version)
+      printf 'agentlink %s\n' "$VERSION"
+      exit 0
+      ;;
+    upgrade)
+      command="upgrade"
+      ;;
+    doctor)
+      command="check"
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        args+=("$1")
+        shift
+      done
+      break
+      ;;
+    -*)
+      usage
+      fail "unknown option: $1"
+      ;;
+    *)
+      args+=("$1")
+      ;;
+  esac
+  shift
+done
+
+if [[ "$command" == "uninstall" ]]; then
+  [[ ${#args[@]} -eq 0 ]] || fail "uninstall does not accept profile arguments"
+  uninstall_agentlink
+  exit 0
+fi
+
+if [[ "$command" == "upgrade" ]]; then
+  [[ ${#args[@]} -eq 0 ]] || fail "upgrade does not accept profile arguments"
+  upgrade_agentlink
+  exit 0
+fi
+
+hermes_root="${HERMES_ROOT:-$HOME/.hermes}"
+profiles_dir="${hermes_root}/profiles"
+
+if [[ "$command" == "list" ]]; then
+  [[ ${#args[@]} -eq 0 ]] || fail "list does not accept profile arguments"
+  list_profiles
+  exit 0
+fi
+
+[[ ${#args[@]} -le 2 ]] || {
+  usage
+  exit 1
+}
+
+profile_name="${args[0]:-}"
+repo_dir_input="${args[1]:-}"
+live_profile_dir=""
+repo_profile_dir=""
+
+resolve_profile
+resolve_source_profile
+resolve_repo_dir
+
+case "$command" in
+  sync)
+    sync_profile
+    ;;
+  check)
+    doctor_profile
+    ;;
+  status)
+    status_profile
+    ;;
+  *)
+    fail "unknown command: $command"
+    ;;
+esac

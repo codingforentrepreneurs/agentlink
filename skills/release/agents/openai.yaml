@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release"
+  short_description: "Ship GitHub releases with checks and tags"
+  default_prompt: "Use $release to prepare, tag, and publish a new GitHub release."
