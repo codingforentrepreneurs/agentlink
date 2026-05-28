@@ -45,12 +45,34 @@ grep -q "^alpha$" /tmp/agentlink-list.out
 grep -q "^beta$" /tmp/agentlink-list.out
 pass "list profiles"
 
+tmp_fake_bin=$(mktemp -d /private/tmp/agentlink-fake-bin.XXXXXX)
+tmp_install_profiles=$(mktemp -d /private/tmp/agentlink-install-profiles.XXXXXX)
+mkdir -p "$tmp_install_profiles/ceo" "$tmp_install_profiles/cmo"
+cat >"$tmp_fake_bin/hermes" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$tmp_fake_bin/hermes.log"
+EOF
+chmod +x "$tmp_fake_bin/hermes"
+PATH="$tmp_fake_bin:$PATH" "$agentlink" install "$tmp_install_profiles/ceo" --alias >/tmp/agentlink-hermes-install.out
+grep -q "^+ hermes profile install .*ceo --alias$" /tmp/agentlink-hermes-install.out
+grep -q "^profile install .*ceo --alias$" "$tmp_fake_bin/hermes.log"
+pass "install profile with alias"
+
+: >"$tmp_fake_bin/hermes.log"
+PATH="$tmp_fake_bin:$PATH" "$agentlink" install "$tmp_install_profiles" --all --alias >/tmp/agentlink-hermes-install-all.out
+grep -q "^+ hermes profile install .*ceo --alias$" /tmp/agentlink-hermes-install-all.out
+grep -q "^+ hermes profile install .*cmo --alias$" /tmp/agentlink-hermes-install-all.out
+grep -q "^profile install .*ceo --alias$" "$tmp_fake_bin/hermes.log"
+grep -q "^profile install .*cmo --alias$" "$tmp_fake_bin/hermes.log"
+pass "install all profiles with alias"
+
 tmp_repo=$(mktemp -d /private/tmp/agentlink-repo.XXXXXX)
 tmp_hermes=$(mktemp -d /private/tmp/agentlink-hermes.XXXXXX)
 mkdir -p "$tmp_hermes/profiles/demo"
 printf 'live config\n' >"$tmp_hermes/profiles/demo/config.yaml"
 HERMES_ROOT="$tmp_hermes" "$agentlink" sync demo "$tmp_repo" >/tmp/agentlink-sync.out
 assert_file "$tmp_repo/config.yaml"
+grep -q "live config" "$tmp_repo/config.yaml"
 assert_file "$tmp_repo/SOUL.md"
 assert_file "$tmp_repo/mcp.json"
 assert_dir "$tmp_repo/skills"
@@ -65,6 +87,21 @@ grep -q '\${HERMES_ROOT}/profiles/demo' "$tmp_repo/README.md"
 ! grep -q "$tmp_hermes" "$tmp_repo/README.md" || fail "README used absolute HERMES_ROOT path"
 tail -1 /tmp/agentlink-sync.out | grep -q "Synced Hermes profile demo to $tmp_repo"
 pass "sync explicit destination"
+
+tmp_sync_all_repo=$(mktemp -d /private/tmp/agentlink-sync-all.XXXXXX)
+tmp_sync_all_hermes=$(mktemp -d /private/tmp/agentlink-sync-all-hermes.XXXXXX)
+mkdir -p "$tmp_sync_all_repo/alpha" "$tmp_sync_all_repo/beta"
+mkdir -p "$tmp_sync_all_hermes/profiles/alpha" "$tmp_sync_all_hermes/profiles/beta"
+printf 'alpha config\n' >"$tmp_sync_all_hermes/profiles/alpha/config.yaml"
+printf 'beta config\n' >"$tmp_sync_all_hermes/profiles/beta/config.yaml"
+HERMES_ROOT="$tmp_sync_all_hermes" "$agentlink" sync "$tmp_sync_all_repo" --all >/tmp/agentlink-sync-all.out
+grep -q "alpha config" "$tmp_sync_all_repo/alpha/config.yaml"
+grep -q "beta config" "$tmp_sync_all_repo/beta/config.yaml"
+assert_link "$tmp_sync_all_hermes/profiles/alpha/config.yaml"
+assert_link "$tmp_sync_all_hermes/profiles/beta/config.yaml"
+grep -q "Synced Hermes profile alpha" /tmp/agentlink-sync-all.out
+grep -q "Synced Hermes profile beta" /tmp/agentlink-sync-all.out
+pass "sync all profile folders"
 
 tmp_default_repo=$(mktemp -d /private/tmp/agentlink-default-readme.XXXXXX)
 tmp_default_home=$(mktemp -d /private/tmp/agentlink-default-home.XXXXXX)
@@ -84,6 +121,20 @@ HERMES_ROOT="$tmp_hermes" "$agentlink" status demo "$tmp_repo" >/tmp/agentlink-s
 grep -q "Status Hermes profile demo" /tmp/agentlink-status.out
 grep -q "linked=" /tmp/agentlink-status.out
 pass "status"
+
+tmp_recover_repo=$(mktemp -d /private/tmp/agentlink-recover.XXXXXX)
+tmp_recover_hermes=$(mktemp -d /private/tmp/agentlink-recover-hermes.XXXXXX)
+mkdir -p "$tmp_recover_hermes/profiles/recover"
+cat >"$tmp_recover_repo/config.yaml" <<'EOF'
+# Hermes profile config.
+# Add model, temperature, reasoning, and tool defaults here.
+{}
+EOF
+printf 'model: recovered\n' >"$tmp_recover_hermes/profiles/recover/config.yaml.backup.20260527153635"
+ln -s "$tmp_recover_repo/config.yaml" "$tmp_recover_hermes/profiles/recover/config.yaml"
+HERMES_ROOT="$tmp_recover_hermes" "$agentlink" sync recover "$tmp_recover_repo" >/tmp/agentlink-recover.out
+grep -q "model: recovered" "$tmp_recover_repo/config.yaml"
+pass "recover default config from prior conflict backup"
 
 tmp_dry_repo=$(mktemp -d /private/tmp/agentlink-dry.XXXXXX)
 tmp_dry_hermes=$(mktemp -d /private/tmp/agentlink-dry-hermes.XXXXXX)

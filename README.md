@@ -18,7 +18,7 @@ cd agent-profiles
 Install a profile into Hermes with an alias:
 
 ```bash
-hermes profile install profiles/agent-1 --alias
+agentlink install profiles/agent-1 --alias
 ```
 
 To use a different command/profile name:
@@ -37,7 +37,7 @@ agent-1 chat
 If you install without `--alias`, use Hermes' profile flag:
 
 ```bash
-hermes profile install profiles/agent-1
+agentlink install profiles/agent-1
 hermes -p agent-1 model
 hermes -p agent-1 chat
 ```
@@ -60,8 +60,8 @@ For a repo that contains multiple agent profiles:
 ```bash
 git clone git@github.com:YOUR_ORG/my-agents.git
 cd my-agents
-hermes profile install ./profiles/agent-1 --alias
-agentlink sync agent-1 profiles/agent-1
+agentlink install ./profiles --all --alias
+agentlink sync ./profiles --all
 agent-1 model
 agent-1 chat
 ```
@@ -136,7 +136,10 @@ Useful options:
 
 ```bash
 agentlink list
+agentlink install ./profiles/my-profile --alias
+agentlink install ./profiles --all --alias
 agentlink sync my-profile .
+agentlink sync ./profiles --all
 agentlink check my-profile .
 agentlink status my-profile .
 agentlink sync my-profile . --from-profile default

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 dry_run=0
 verbose=0
 assume_yes=0
 command="sync"
 from_profile=""
+all_profiles=0
+install_alias=0
 profiles=()
 
 portable_items=(
@@ -51,6 +53,9 @@ usage() {
 Usage:
   ${command_name} [options] [profile-name] [path/to/git-folder]
   ${command_name} sync [options] [profile-name] [path/to/git-folder]
+  ${command_name} sync [options] path/to/profiles-folder --all
+  ${command_name} install [options] path/to/profile-folder
+  ${command_name} install [options] path/to/profiles-folder --all
   ${command_name} check [options] [profile-name] [path/to/git-folder]
   ${command_name} status [options] [profile-name] [path/to/git-folder]
   ${command_name} list
@@ -64,6 +69,8 @@ Options:
   -y, --yes        Non-interactive mode; fail instead of prompting
       --from-profile <profile>
                    Seed missing files from another Hermes profile
+      --all        Install or sync every immediate child profile directory
+      --alias      Pass --alias to hermes profile install
   -h, --help       Show help
       --version    Show version
 EOF
@@ -293,9 +300,12 @@ resolve_repo_dir() {
 is_correct_symlink() {
   local live_path=$1
   local repo_path=$2
+  local linked_path
 
   [[ -L "$live_path" ]] || return 1
-  [[ "$(readlink "$live_path")" == "$repo_path" ]]
+  linked_path=$(readlink "$live_path")
+  [[ "$linked_path" == "$repo_path" ]] && return 0
+  [[ -e "$linked_path" && -e "$repo_path" && "$linked_path" -ef "$repo_path" ]]
 }
 
 display_live_profile_dir() {
@@ -462,6 +472,7 @@ write_soul() {
   local soul_path="${repo_profile_dir}/SOUL.md"
 
   path_exists "$soul_path" && return
+  path_exists "${live_profile_dir}/SOUL.md" && return
   copy_from_profile_item "SOUL.md" && return
 
   if [[ "$dry_run" -eq 1 ]]; then
@@ -482,6 +493,7 @@ write_config() {
   local config_path="${repo_profile_dir}/config.yaml"
 
   path_exists "$config_path" && return
+  path_exists "${live_profile_dir}/config.yaml" && return
   copy_from_profile_item "config.yaml" && return
 
   if [[ "$dry_run" -eq 1 ]]; then
@@ -502,6 +514,7 @@ write_mcp() {
   local mcp_path="${repo_profile_dir}/mcp.json"
 
   path_exists "$mcp_path" && return
+  path_exists "${live_profile_dir}/mcp.json" && return
   copy_from_profile_item "mcp.json" && return
 
   if [[ "$dry_run" -eq 1 ]]; then
@@ -522,6 +535,7 @@ ensure_distribution_dir() {
   local dir_path="${repo_profile_dir}/${1}"
 
   path_exists "$dir_path" && return
+  path_exists "${live_profile_dir}/${1}" && return
   copy_from_profile_item "$1" && return
 
   if [[ "$dry_run" -eq 1 ]]; then
@@ -546,6 +560,47 @@ link_to_repo() {
   log_detail "LINK $live_path -> $repo_path"
 }
 
+is_default_config() {
+  local config_path=$1
+  local expected
+  local actual
+
+  [[ -f "$config_path" ]] || return 1
+
+  expected=$'# Hermes profile config.\n# Add model, temperature, reasoning, and tool defaults here.\n{}'
+  actual=$(cat "$config_path")
+  [[ "$actual" == "$expected" ]]
+}
+
+latest_backup_path() {
+  local backup_prefix=$1
+  local candidate
+  local latest=""
+
+  for candidate in "$backup_prefix".backup.*; do
+    [[ -e "$candidate" ]] || continue
+    latest=$candidate
+  done
+
+  [[ -n "$latest" ]] || return 1
+  printf '%s\n' "$latest"
+}
+
+recover_default_config_from_backup() {
+  local live_path=$1
+  local repo_path=$2
+  local backup_path
+
+  is_default_config "$repo_path" || return 1
+  backup_path=$(latest_backup_path "$live_path") || return 1
+
+  log_detail "RECOVER $repo_path from $backup_path"
+  if [[ "$dry_run" -eq 0 ]]; then
+    cp "$backup_path" "$repo_path"
+  fi
+  return 0
+}
+
 process_portable_item() {
   local item=$1
   local live_path="${live_profile_dir}/${item}"
@@ -553,6 +608,9 @@ process_portable_item() {
   local backup_path
 
   if is_correct_symlink "$live_path" "$repo_path"; then
+    if [[ "$item" == "config.yaml" ]]; then
+      recover_default_config_from_backup "$live_path" "$repo_path" || true
+    fi
     log_detail "OK $live_path -> $repo_path"
     return
   fi
@@ -650,6 +708,43 @@ sync_profile() {
   else
     printf 'Synced Hermes profile %s to %s\n' "$profile_name" "$repo_profile_dir"
   fi
+}
+
+sync_profile_dir() {
+  local profile_dir=$1
+
+  [[ -d "$profile_dir" ]] || fail "profile folder not found: $profile_dir"
+
+  profile_name=$(basename "$profile_dir")
+  live_profile_dir="${profiles_dir}/${profile_name}"
+  repo_profile_dir=$(absolute_path "$profile_dir")
+
+  if ! path_exists "$live_profile_dir"; then
+    printf 'ERROR Hermes profile not found: %s\n' "$live_profile_dir" >&2
+    return 1
+  fi
+
+  sync_profile
+}
+
+sync_all_profiles() {
+  local input_path=$1
+  local path synced=0 failed=0
+
+  [[ -d "$input_path" ]] || fail "profiles folder not found: $input_path"
+  resolve_source_profile
+
+  for path in "$input_path"/*; do
+    [[ -d "$path" || -L "$path" ]] || continue
+    if sync_profile_dir "$path"; then
+      synced=$((synced + 1))
+    else
+      failed=$((failed + 1))
+    fi
+  done
+
+  [[ "$synced" -gt 0 ]] || fail "no profile folders synced from $input_path"
+  [[ "$failed" -eq 0 ]] || fail "failed to sync $failed profile(s)"
 }
 
 doctor_profile() {
@@ -793,6 +888,56 @@ upgrade_agentlink() {
   fi
 }
 
+install_hermes_profile_dir() {
+  local profile_dir=$1
+  local profile_path
+  local -a cmd
+
+  [[ -d "$profile_dir" ]] || fail "profile folder not found: $profile_dir"
+  profile_path=$(absolute_path "$profile_dir")
+
+  cmd=(hermes profile install "$profile_path")
+  if [[ "$install_alias" -eq 1 ]]; then
+    cmd+=(--alias)
+  fi
+
+  printf '+'
+  printf ' %q' "${cmd[@]}"
+  printf '\n'
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    return
+  fi
+
+  command -v hermes >/dev/null 2>&1 || fail "hermes command not found"
+
+  "${cmd[@]}"
+}
+
+install_hermes_profiles() {
+  local input_path=$1
+  local path installed=0 failed=0
+
+  if [[ "$all_profiles" -eq 0 ]]; then
+    install_hermes_profile_dir "$input_path"
+    return
+  fi
+
+  [[ -d "$input_path" ]] || fail "profiles folder not found: $input_path"
+
+  for path in "$input_path"/*; do
+    [[ -d "$path" || -L "$path" ]] || continue
+    if install_hermes_profile_dir "$path"; then
+      installed=$((installed + 1))
+    else
+      failed=$((failed + 1))
+    fi
+  done
+
+  [[ "$installed" -gt 0 ]] || fail "no profile folders found in $input_path"
+  [[ "$failed" -eq 0 ]] || fail "failed to install $failed profile(s)"
+}
+
 args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -821,8 +966,17 @@ while [[ $# -gt 0 ]]; do
     --from-profile=*)
       from_profile=${1#*=}
       ;;
+    --all)
+      all_profiles=1
+      ;;
+    --alias)
+      install_alias=1
+      ;;
     sync)
       command="sync"
+      ;;
+    install)
+      command="install"
       ;;
     check)
       command="check"
@@ -877,6 +1031,24 @@ if [[ "$command" == "upgrade" ]]; then
   exit 0
 fi
 
+if [[ "$command" == "install" ]]; then
+  [[ -z "$from_profile" ]] || fail "install does not accept --from-profile"
+  [[ ${#args[@]} -eq 1 ]] || {
+    usage
+    fail "install requires exactly one profile folder or profiles folder"
+  }
+  install_hermes_profiles "${args[0]}"
+  exit 0
+fi
+
+if [[ "$install_alias" -eq 1 ]]; then
+  fail "--alias is only supported with install"
+fi
+
+if [[ "$all_profiles" -eq 1 && "$command" != "sync" ]]; then
+  fail "--all is only supported with install and sync"
+fi
+
 if [[ -n "${HERMES_ROOT+x}" ]]; then
   hermes_root_from_env=1
 else
@@ -889,6 +1061,15 @@ profiles_dir="${hermes_root}/profiles"
 if [[ "$command" == "list" ]]; then
   [[ ${#args[@]} -eq 0 ]] || fail "list does not accept profile arguments"
   list_profiles
+  exit 0
+fi
+
+if [[ "$command" == "sync" && "$all_profiles" -eq 1 ]]; then
+  [[ ${#args[@]} -eq 1 ]] || {
+    usage
+    fail "sync --all requires exactly one profiles folder"
+  }
+  sync_all_profiles "${args[0]}"
   exit 0
 fi
 
