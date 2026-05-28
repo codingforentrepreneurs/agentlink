@@ -1,0 +1,15 @@
+name: agent-cmo
+version: 0.1.0
+description: "Chief marketing officer agent for an organization: positioning, GTM, campaigns, growth strategy, and marketing performance."
+hermes_requires: ">=0.12.0"
+author: "Justin Mitchel (jmitchel3)"
+license: "MIT"
+env_requires: []
+distribution_owned:
+  - SOUL.md
+  - profile.md
+  - README.md
+  - config.yaml
+  - mcp.json
+  - skills/
+  - cron/
