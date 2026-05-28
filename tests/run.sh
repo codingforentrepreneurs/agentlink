@@ -189,9 +189,24 @@ AGENT_LINK_BIN_DIR="$tmp_bin" AGENTLINK_HOME="$tmp_home" "$install_script" >/tmp
 assert_link "$tmp_bin/agentlink"
 test "$tmp_bin/agentlink" -ef "$tmp_home/bin/agentlink"
 test -x "$tmp_home/install.sh"
-AGENT_LINK_BIN_DIR="$tmp_bin" AGENTLINK_HOME="$tmp_home" "$tmp_bin/agentlink" upgrade >/tmp/agentlink-upgrade.out 2>/tmp/agentlink-upgrade.err
+grep -q "^agentlink " /tmp/agentlink-install.out
+AGENTLINK_UPGRADE_FROM_LOCAL=1 AGENT_LINK_BIN_DIR="$tmp_bin" AGENTLINK_HOME="$tmp_home" "$tmp_bin/agentlink" upgrade >/tmp/agentlink-upgrade.out 2>/tmp/agentlink-upgrade.err
 assert_link "$tmp_bin/agentlink"
 test "$tmp_bin/agentlink" -ef "$tmp_home/bin/agentlink"
+grep -q "^Current version: agentlink " /tmp/agentlink-upgrade.out
+grep -q "^Upgraded version: agentlink " /tmp/agentlink-upgrade.out
+tmp_remote=$(mktemp -d /private/tmp/agentlink-remote.XXXXXX)
+tmp_remote_home=$(mktemp -d /private/tmp/agentlink-remote-home.XXXXXX)
+tmp_remote_bin=$(mktemp -d /private/tmp/agentlink-remote-bin.XXXXXX)
+mkdir -p "$tmp_remote/bin"
+cp "$install_script" "$tmp_remote/install.sh"
+cp "$agentlink" "$tmp_remote/bin/agentlink"
+perl -0pi -e 's/VERSION="[^"]+"/VERSION="9.9.9"/' "$tmp_remote/bin/agentlink"
+AGENT_LINK_BIN_DIR="$tmp_remote_bin" AGENTLINK_HOME="$tmp_remote_home" "$install_script" >/tmp/agentlink-remote-install.out 2>/tmp/agentlink-remote-install.err
+grep -q "^agentlink " /tmp/agentlink-remote-install.out
+(cd /private/tmp && AGENT_LINK_BIN_DIR="$tmp_remote_bin" AGENTLINK_HOME="$tmp_remote_home" AGENTLINK_RAW_URL="file://$tmp_remote" "$tmp_remote_bin/agentlink" upgrade >/tmp/agentlink-remote-upgrade.out 2>/tmp/agentlink-remote-upgrade.err)
+grep -q "^Current version: agentlink " /tmp/agentlink-remote-upgrade.out
+grep -q "^Upgraded version: agentlink 9.9.9$" /tmp/agentlink-remote-upgrade.out
 AGENT_LINK_BIN_DIR="$tmp_bin" AGENTLINK_HOME="$tmp_home" "$tmp_bin/agentlink" uninstall >/tmp/agentlink-uninstall.out
 [[ ! -e "$tmp_bin/agentlink" ]] || fail "uninstall left agentlink symlink"
 [[ ! -e "$tmp_home" ]] || fail "uninstall left install home"

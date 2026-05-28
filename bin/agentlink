@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 
 dry_run=0
 verbose=0
@@ -869,22 +869,32 @@ uninstall_agentlink() {
 
 upgrade_agentlink() {
   local local_installer
+  local local_source_dir
   local repo_raw_url
+  local upgraded_version
 
   local_installer="$(script_dir)/../install.sh"
+  local_source_dir=$(cd -P "$(script_dir)/.." >/dev/null 2>&1 && pwd)
 
-  if [[ -f "$local_installer" ]]; then
-    exec bash "$local_installer"
+  printf 'Current version: agentlink %s\n' "$VERSION"
+
+  if [[ -f "$local_installer" && ( -d "${local_source_dir}/.git" || "${AGENTLINK_UPGRADE_FROM_LOCAL:-0}" == "1" ) ]]; then
+    bash "$local_installer"
+  else
+    repo_raw_url="${AGENTLINK_RAW_URL:-https://raw.githubusercontent.com/codingforentrepreneurs/agentlink/main}"
+
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL "${repo_raw_url}/install.sh" | bash
+    elif command -v wget >/dev/null 2>&1; then
+      wget -qO - "${repo_raw_url}/install.sh" | bash
+    else
+      fail "upgrade requires curl or wget"
+    fi
   fi
 
-  repo_raw_url="${AGENTLINK_RAW_URL:-https://raw.githubusercontent.com/codingforentrepreneurs/agentlink/main}"
-
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "${repo_raw_url}/install.sh" | bash
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO - "${repo_raw_url}/install.sh" | bash
-  else
-    fail "upgrade requires curl or wget"
+  upgraded_version="$(script_dir)/agentlink"
+  if [[ -x "$upgraded_version" ]]; then
+    printf 'Upgraded version: %s\n' "$("$upgraded_version" version)"
   fi
 }
 

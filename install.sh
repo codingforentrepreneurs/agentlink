@@ -99,6 +99,8 @@ cat <<EOF
 
 Installed:
 
+$("${install_dir}/bin/agentlink" version)
+
 agentlink <profile-name>
 agentlink upgrade
 agentlink uninstall
